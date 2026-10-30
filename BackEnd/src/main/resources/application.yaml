@@ -1,0 +1,52 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: dzdp
+
+  profiles:
+    active: dev
+
+  jackson:
+    default-property-inclusion: non_null
+
+  # RabbitMQ 生产端可靠性与消费端手动 ACK（连接信息在 application-dev/prod.yml 中配置）
+  rabbitmq:
+    # 发布确认：Broker 是否收到消息，由 RabbitProducerConfig 的 confirm 回调处理
+    publisher-confirm-type: correlated
+    # 发布退回：消息无法路由到队列时退回给生产者（需配合 template.mandatory=true）
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        # 手动 ACK：由 SeckillVoucherListener 在业务处理完成后显式 ack / nack
+        acknowledge-mode: manual
+        # 每个消费者一次只预取一条：秒杀消费是重 IO 操作，公平分发更均匀，
+        # 也避免实例重启后大量已预取但未确认的消息被集中重投
+        prefetch: 1
+
+mybatis-plus:
+  type-aliases-package: com.dzdp.entity
+
+logging:
+  level:
+    com.dzdp: debug
+
+# 开发期接口/Service 性能采集（实现见 com.dzdp.trace 包）
+# 这里放默认值：默认关闭，因此生产环境无需额外配置就是"不采集"状态
+dev-trace:
+  enabled: false
+  slow-ms: 200            # 慢接口阈值(毫秒)，超过用 WARN 级别输出
+  service-slow-ms: 50     # Service 明细输出阈值(毫秒)
+  max-arg-length: 200     # 单个参数值最大长度，超出截断
+  max-params: 20          # 单次请求最多采集的参数个数
+  max-service-lines: 10   # 单次请求最多输出的 Service 明细行数
+  mask-keys: password,token,code,phone,authorization,idCard
+
+# 接口限流（令牌桶，实现见 com.dzdp.ratelimit 包）
+# 默认开启且不配置白名单：生产环境不做任何额外配置就是"全部限流"的安全状态
+rate-limit:
+  enabled: true
+  key-prefix: ratelimit
