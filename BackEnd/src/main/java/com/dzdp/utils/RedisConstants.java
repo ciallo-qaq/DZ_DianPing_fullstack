@@ -22,4 +22,8 @@ public class RedisConstants {
 
     public static final String SHOP_TYPE_KEY = "shop_type:";
     public static final Long SHOP_TYPE_LONG=10L;
+
+    public static final String SEARCH_SUGGESTION_KEY = "search:suggestions:";
+    public static final Long SEARCH_SUGGESTION_TTL = 300L;
+    public static final Long SEARCH_SUGGESTION_EMPTY_TTL = 30L;
 }

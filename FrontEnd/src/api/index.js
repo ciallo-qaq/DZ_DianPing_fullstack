@@ -21,6 +21,15 @@ export const getShopsByName = (params) =>
   request.get("/shop/of/name", { params });
 export const getShopTypes = () => request.get("/shop-type/list");
 
+// 实时搜索
+export const getSearchSuggestions = (keyword, requestId, signal) =>
+  request.get("/search/suggestions", {
+    params: { keyword, requestId },
+    signal
+  });
+export const getSearchResults = (params, signal) =>
+  request.get("/search/results", { params, signal });
+
 // 探店笔记
 export const createBlog = (blog) => request.post("/blog", blog);
 export const toggleBlogLike = (id) => request.put(`/blog/like/${id}`);

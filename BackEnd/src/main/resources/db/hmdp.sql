@@ -34,7 +34,9 @@ CREATE TABLE `tb_blog`  (
   `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   PRIMARY KEY (`id`) USING BTREE,
   INDEX `idx_user_create`(`user_id`, `create_time`) USING BTREE,
-  INDEX `idx_liked`(`liked`, `id`) USING BTREE
+  INDEX `idx_liked`(`liked`, `id`) USING BTREE,
+  INDEX `idx_title`(`title`) USING BTREE,
+  FULLTEXT INDEX `ft_blog_content`(`content`) WITH PARSER ngram
 ) ENGINE = InnoDB AUTO_INCREMENT = 23 CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci ROW_FORMAT = Compact;
 
 -- ----------------------------
@@ -1312,6 +1314,8 @@ SET FOREIGN_KEY_CHECKS = 1;
      idx_shop_status  券列表 WHERE shop_id=? AND status=1（原来 tb_voucher 全表扫）
      idx_user_create  我的笔记/某人的笔记 WHERE user_id=? ORDER BY create_time DESC
      idx_liked        热榜 ORDER BY liked DESC, id DESC（走索引反向扫描，去掉 filesort）
+     idx_title        博客标题前缀搜索 WHERE title LIKE '关键词%'
+     ft_blog_content  博客正文中文全文搜索，MATCH(content) AGAINST(...)，需要 ngram parser
      idx_name         店铺名搜索，必须配合 likeRight 生成 'name LIKE 关键字%' 才能命中
 
    ALTER TABLE tb_follow
@@ -1326,7 +1330,9 @@ SET FOREIGN_KEY_CHECKS = 1;
 
    ALTER TABLE tb_blog
        ADD INDEX `idx_user_create`(`user_id`, `create_time`) USING BTREE,
-       ADD INDEX `idx_liked`(`liked`, `id`) USING BTREE;
+       ADD INDEX `idx_liked`(`liked`, `id`) USING BTREE,
+       ADD INDEX `idx_title`(`title`) USING BTREE,
+       ADD FULLTEXT INDEX `ft_blog_content`(`content`) WITH PARSER ngram;
 
    ALTER TABLE tb_shop
        ADD INDEX `idx_name`(`name`) USING BTREE;

@@ -75,14 +75,44 @@ src/main/resources/
 
 ## 二、重点整理
 
-### 2.1 集群下 Session 不共享
+### 2.1 近实时搜索建议功能实现
+1. blog表content字段过长，组成部分多\
+-**解决**: 正文(MEDIUMTEXT)与图片URL存储MySQL,图片与视频存储OSS/MinIO
+
+2. 请求乱序问题：符合防抖的几条请求，后请求返回比先请求早，正确响应被覆盖\
+-**解决**: 每次请求附带递增请求序号RequestID，仅最新请求的响应允许更新页面
+
+3. 大数据量下，keyword匹配所有blog正文，耗时过长不能接受。\
+-**解决**: \
+**方案1**：MySQL Full-Text Index与MySQL N-Gram Parser，N-Gram算法进行中文分词，全文索引为 Token<-->出现文档ID列表 进行映射。
+#### **注意点**
+##### 1.full text index在数据插入，索引构建，更新时提前建立，不是搜索时才进行分词
+##### 2.全文搜索模式：NATURAL LANGUAGE MODE / BOOLEAN MODE / QUERY EXTENSION,以相关度计算返回排序
+##### 3.InnoDB内部维护      FTS_INDEX_TABLE & FTS_DOC_ID & FTS_辅助表 & FTS Index Cache等等
+##### 4.N越小，单个Token取值空间越小
+##### 5.N越大，短关键词检索能力受限
+##### 6.不同文章更容易共享相同Token，高频Token对应过呢工厂Posting List
+
+**方案2**：引入ElasticSearch
+
+4. 完整链路耗时过长，如何实现近实时？
+
+5. 高并发下数据库查询压力大 \
+-**解决**:   缓存热门keyword，前端防抖设计，后端限流
+
+6. 关联后返回列表排序\ 
+-**解决**: 自定义评分模型，定义权重
+
+
+
+### 2.2 集群下 Session 不共享
 
 - **隐患**：多实例部署时 Tomcat 各自持有 Session，请求被负载均衡切到另一台就"掉登录"。
 - **方案**：把登录态从服务端 Session 挪到 Redis。签发不透明 Token（UUID），`login:token:{token}` 存 Hash；客户端在 `authorization` 头带 Token。
 - **落地**：`UserServiceImpl#login` + `RefreshTokenInterceptor`（读 Token 换用户、续期 30 分钟）+ `UserHolder`(ThreadLocal)。
 - **要点**：Token 放 Header 而不是 Cookie（降低 CSRF 面）；ThreadLocal 传递用户上下文。
 
-### 2.2 缓存三大问题
+### 2.3 缓存三大问题
 
 | 问题 | 成因 | 本项目方案 | 位置 |
 |------|------|-----------|------|
@@ -92,7 +122,7 @@ src/main/resources/
 
 - **互斥锁 vs 逻辑过期**：互斥锁能保证数据强一致但会阻塞请求；逻辑过期牺牲短暂一致性换取可用性与低延迟，代价是必须做**缓存预热**且 key 常驻内存。
 
-### 2.3 缓存与数据库一致性
+### 2.4 缓存与数据库一致性
 
 - **方案**：Cache Aside —— 先更新 DB，再删缓存，且删缓存放在**事务提交之后**。
 - **隐患（并发竞态）**：读线程 A 查库得到 V1 → 写线程 B 更新 DB 为 V2 并删缓存 → A 才把 V1 写回缓存 → 缓存长期是脏的。
@@ -100,7 +130,7 @@ src/main/resources/
 - **若引入本地缓存**：进程隔离会让多实例的 Caffeine 互不可见，脏数据无法通过"删 Redis"消除。可选 ① MQ 广播失效消息；② 重可用性，给本地缓存设很短的 TTL，容忍秒级不一致。
 - **落地**：`ShopServiceImpl#update`（Cache Aside）。
 
-### 2.4 秒杀超卖
+### 2.5 秒杀超卖
 
 - **隐患**：`查到库存 → 判断 → 扣减` 三步不原子，并发下多个线程都通过了判断。
 - **方案**：
@@ -110,7 +140,7 @@ src/main/resources/
 - **落地**：`seckill.lua`（Redis 层）+ `SeckillVoucherListener`（`stock>0` 条件下 `stock-1`）。
 - **难点**：热点行行锁竞争激烈，进一步可做库存分片（`stock:{voucherId}:{n}` 多子库存路由）。
 
-### 2.5 一人一单
+### 2.6 一人一单
 
 - **隐患**：先查订单再插入，并发下两个请求都能查到 0 条。
 - **方案**：
@@ -119,7 +149,7 @@ src/main/resources/
     3. 业务层 `count(*)` 先查后插。
 - **难点**：MQ 重投或用户重试会命中"已存在"，正确语义应是**返回原订单号**而不是报错，需要幂等键。
 
-### 2.6 分布式锁的三段演进
+### 2.7 分布式锁的三段演进
 
 1. **`SETNX` 裸锁**：进程宕机导致死锁 → 必须带过期时间 `SET key value NX EX`。
 2. **释放别人的锁**：业务超过过期时间，锁自动释放后被别人拿到，原线程却把它删了 → value 存线程标识（`UUID + threadId`）；再把"比对标识 + 删除"用 Lua 做成原子操作（`unLock.lua`）。
@@ -130,14 +160,14 @@ src/main/resources/
 - **落地**：`SimpleRedisLock` 与 `RedissonClient`。
 - **重要认知**：`synchronized`/`ReentrantLock` 只在单 JVM 有效，多实例下锁监视器互不可见，必须用跨进程可见的锁。
 
-### 2.7 全局唯一 ID
+### 2.8 全局唯一 ID
 
 - **隐患**：`tb_voucher_order` 用自增主键，单表数量受限、分库分表后可能重复，且会暴露订单量。
 - **方案**：`RedisIdWorker` = 时间戳(32 位，相对 2022-01-01 的秒数) << 32 | 日序列号(32 位)，序列号由 Redis `INCR icr:{prefix}:{yyyy:MM:dd}` 得到。
 - **为什么用 Redis**：`INCR` 是单线程原子操作，吞吐远高于数据库自增；原子递增天然无并发隐患。
 - **隐患**：Redis 宕机即无法发号 → 需要主从/哨兵 + AOF 持久化（当前未配置）。
 
-### 2.8 秒杀链路异步化与消息可靠性
+### 2.9 秒杀链路异步化与消息可靠性
 
 - **隐患**：`查券 → 判库存 → 查订单 → 一人一单 → 扣库存 → 建订单` 同步串联耗时过长，用户端 RT 高、系统吞吐差。
 - **方案**：Redis 缓存券与资格信息 + Lua 原子判定 → 把订单信息投递到 MQ → 独立消费者做落库与扣减。
@@ -150,7 +180,7 @@ src/main/resources/
     - **未支付订单到期关单**：Spring Task 定时扫 / RocketMQ 延迟消息 / Redis 过期监听，三选一。
     - **关单与支付并发**：乐观锁保证二者只有一个生效。
 
-### 2.9 Feed 流（关注流）
+### 2.10 Feed 流（关注流）
 
 | 模式 | 做法 | 代价 |
 |------|------|------|
@@ -161,14 +191,14 @@ src/main/resources/
 - **落地**：推模式 —— `BlogServiceImpl#saveBlog` 查粉丝列表后逐个 `ZADD feed:{userId}`；收件箱是 ZSet，score 为时间戳。
 - **已知优化点**：当前是 `for` 循环逐个 `ZADD`，每次一次网络往返，粉丝多时 RTT 累积明显 → 可用 **pipeline 批量写**。
 
-### 2.10 滚动分页
+### 2.11 滚动分页
 
 - **为什么不用 `limit page, size`**：ZSet 分页用下标偏移在数据变动时会重复或漏数据；且 Feed 数据量大，深分页成本高。
 - **方案**：`reverseRangeByScoreWithScores(key, 0, lastId, offset, 2)` —— 用**上一次的最小时间戳**作为游标，把"同分数并列"的条数作为 `offset` 带出。
 - **落地**：`BlogServiceImpl#queryBlogOfFollow` + `ScrollResult{list, minTime, offset}`。
 - **细节**：同一秒发布的笔记必须靠 `offset` 去重，否则会漏条目。
 
-### 2.11 自定义注解 + AOP
+### 2.12 自定义注解 + AOP
 
 1. **注解三要素**：`@Retention(RUNTIME)`（运行期要反射读，不能是 CLASS/SOURCE）、`@Target`、属性默认值。
 2. **切点表达式选型**：`@annotation(X)` 只匹配**方法**上的注解；`@within(X)` 匹配**类**上的注解（对该类所有方法生效）；`@target` 看运行期类型。
@@ -181,14 +211,14 @@ src/main/resources/
 6. **非 Web 上下文**：切面里通过 `RequestContextHolder` 取请求，异步线程/定时任务里取不到，必须判空降级（项目里返回 null → 放行，而不是抛异常）。
 7. **覆盖范围**：注解只对 Controller 生效，Service 内部互相调用不受限流保护。
 
-### 2.12 限流器的细节
+### 2.13 限流器的细节
 
 - **桶 key 必须不可伪造**：`X-Forwarded-For` 是客户端可写的，若直接拼进 key，攻击者可以伪造 header 把自己"搬"到别人的桶或空桶里。
   项目做法：优先 `X-Real-IP`（由 nginx 覆写），否则取 XFF **最后一跳**，再做字符白名单过滤（`|` 不在白名单内，因此分隔符不可伪造），并限制长度上限 64。
 - **failOpen 语义**：Redis 挂掉时，验证码/秒杀这类接口用 `failOpen=false`（宁可快速失败，也不放流量进来），普通查询用 `true` 保可用性。
 - **key 自动回收**：桶 TTL = 补满整桶所需时间的 2 倍，避免 key 无界增长（`RateLimitSpec#ttlMillis`）。
 
-### 2.13 性能采集的取舍
+### 2.14 性能采集的取舍
 
 - 简单的开发期调优工具。
 - 采集结果只做**聚合**：同一 Service 方法一次请求内多次调用合并为 `xN`，用于 N+1 查询问题发现。
@@ -197,14 +227,24 @@ src/main/resources/
 
 ## 三、杂
 
-### 3.1 限流算法选择
+
+
+### 3.1 实时搜索方案todo
+1. blog content字段拆分：正文，图片url存储MySQL，图片，视频存储OSS/MinIO
+2. 请求乱序问题：请求附带递增RequestId，仅最新请求的响应允许更新页面
+3. 关联过程中，如何从大量blog查询含有keyword的blog：N-gram算法/ES
+4. 完整链路耗时过长，如何实现近实时？
+5. 评分模型定义权重，返回评分高的几条。
+
+
+### 3.2 限流算法选择
 
 1. **固定窗口**：时间划分为固定大小窗口，超过 cnt_max 则进入下个窗口 → 隐患：临界点允许两倍流量。
 2. **滑动窗口**：永远统计最近 N 个桶的流量 → 隐患：窗口边界重置，流量集中边界涌入。
 3. **漏桶算法**：以固定速率处理流量，平滑输出 → 隐患：不能处理突发流量。
 4. **令牌桶算法**：Redis hash + Lua 实现，token 生成速率 == 平均请求速率，桶容量 == 突发流量。
 
-### 3.2 其他 Redis 特性应用
+### 3.3 其他 Redis 特性应用
 
 **点赞排行榜（Redis ZSet）**
 - 需求：按时间排序的点赞列表。

@@ -47,6 +47,9 @@ service.interceptors.response.use(
     return result;
   },
   (error) => {
+    if (axios.isCancel(error)) {
+      return Promise.reject(error);
+    }
     const status = error.response?.status;
     const retryAfter = error.response?.headers?.["retry-after"];
     const serverMessage = error.response?.data?.errorMsg;

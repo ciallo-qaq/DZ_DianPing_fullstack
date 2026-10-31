@@ -1,10 +1,23 @@
 <script setup>
-import { onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
-import { getHotBlogs, getShopTypes, toggleBlogLike } from "../api";
+import {
+  getHotBlogs,
+  getSearchSuggestions,
+  getShopTypes,
+  toggleBlogLike
+} from "../api";
 import { getToken } from "../utils/auth";
 import { normalizeBlog, resolveImageUrl } from "../utils/utils";
+
+const SEARCH_DEBOUNCE_MS = 300;
+const MAX_SEARCH_LENGTH = 10;
+const TYPE_LABELS = {
+  SHOP: "店铺",
+  VOUCHER: "优惠",
+  BLOG: "笔记"
+};
 
 const router = useRouter();
 const types = ref([]);
@@ -13,6 +26,18 @@ const current = ref(1);
 const loading = ref(false);
 const finished = ref(false);
 const keyword = ref("");
+const suggestions = ref([]);
+const suggestionsLoading = ref(false);
+const suggestionsVisible = ref(false);
+const searchFocused = ref(false);
+const highlightedIndex = ref(-1);
+const keywordTooLong = computed(
+  () => Array.from(keyword.value.trim()).length > MAX_SEARCH_LENGTH
+);
+
+let debounceTimer = null;
+let requestVersion = 0;
+let suggestionController = null;
 
 async function loadTypes() {
   try {
@@ -50,12 +75,122 @@ function openShopList(type) {
 }
 
 function search() {
-  const name = keyword.value.trim();
-  if (!name) {
-    ElMessage.info("请输入店铺名称");
+  const searchKeyword = keyword.value.trim();
+  if (!searchKeyword) {
+    ElMessage.info("请输入搜索关键词");
     return;
   }
-  router.push({ path: "/shop-list", query: { name } });
+  if (Array.from(searchKeyword).length > MAX_SEARCH_LENGTH) {
+    return;
+  }
+  closeSuggestions();
+  router.push({
+    path: "/search-results",
+    query: { keyword: searchKeyword, type: "ALL" }
+  });
+}
+
+function closeSuggestions() {
+  suggestionsVisible.value = false;
+  highlightedIndex.value = -1;
+}
+
+function clearPendingSuggestionRequest() {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  if (suggestionController) {
+    suggestionController.abort();
+    suggestionController = null;
+  }
+}
+
+async function loadSuggestions(searchKeyword, version) {
+  suggestionController = new AbortController();
+  suggestionsLoading.value = true;
+  suggestionsVisible.value = searchFocused.value;
+  try {
+    const { data } = await getSearchSuggestions(
+      searchKeyword,
+      version,
+      suggestionController.signal
+    );
+    if (
+      version !== requestVersion ||
+      keyword.value.trim() !== searchKeyword ||
+      data?.keyword !== searchKeyword
+    ) {
+      return;
+    }
+    suggestions.value = data?.suggestions || [];
+    highlightedIndex.value = -1;
+    suggestionsVisible.value = searchFocused.value;
+  } catch (error) {
+    if (version !== requestVersion || error?.code === "ERR_CANCELED") {
+      return;
+    }
+    suggestions.value = [];
+    suggestionsVisible.value = searchFocused.value;
+  } finally {
+    if (version === requestVersion) {
+      suggestionsLoading.value = false;
+    }
+  }
+}
+
+function handleSuggestionFocus() {
+  searchFocused.value = true;
+  if (suggestions.value.length) {
+    suggestionsVisible.value = true;
+  }
+}
+
+function handleSuggestionBlur() {
+  window.setTimeout(() => {
+    searchFocused.value = false;
+    suggestionsVisible.value = false;
+  }, 100);
+}
+
+function moveSuggestion(step) {
+  if (!suggestionsVisible.value || !suggestions.value.length) {
+    return;
+  }
+  const length = suggestions.value.length;
+  highlightedIndex.value =
+    (highlightedIndex.value + step + length) % length;
+}
+
+function handleSearchEnter() {
+  if (
+    suggestionsVisible.value &&
+    highlightedIndex.value >= 0 &&
+    suggestions.value[highlightedIndex.value]
+  ) {
+    selectSuggestion(suggestions.value[highlightedIndex.value]);
+    return;
+  }
+  search();
+}
+
+function selectSuggestion(suggestion) {
+  const searchKeyword = suggestion.suggestionText || suggestion.title;
+  if (!searchKeyword) {
+    return;
+  }
+  requestVersion += 1;
+  clearPendingSuggestionRequest();
+  keyword.value = searchKeyword;
+  suggestions.value = [];
+  closeSuggestions();
+  router.push({
+    path: "/search-results",
+    query: {
+      keyword: searchKeyword,
+      type: suggestion.type || "ALL"
+    }
+  });
 }
 
 function openBlog(blog) {
@@ -87,9 +222,36 @@ function handleScroll(event) {
   }
 }
 
+watch(keyword, (value) => {
+  clearPendingSuggestionRequest();
+  requestVersion += 1;
+  suggestions.value = [];
+  suggestionsLoading.value = false;
+  closeSuggestions();
+
+  const searchKeyword = value.trim();
+  if (
+    !searchKeyword ||
+    Array.from(searchKeyword).length > MAX_SEARCH_LENGTH
+  ) {
+    return;
+  }
+
+  const version = requestVersion;
+  debounceTimer = window.setTimeout(() => {
+    debounceTimer = null;
+    loadSuggestions(searchKeyword, version);
+  }, SEARCH_DEBOUNCE_MS);
+});
+
 onMounted(() => {
   loadTypes();
   loadBlogs();
+});
+
+onBeforeUnmount(() => {
+  clearPendingSuggestionRequest();
+  requestVersion += 1;
 });
 </script>
 
@@ -97,14 +259,55 @@ onMounted(() => {
   <main class="page home-page">
     <header class="hero">
       <div class="location"><el-icon><Location /></el-icon> 杭州</div>
-      <div class="search-box">
-        <el-icon><Search /></el-icon>
-        <input
-          v-model="keyword"
-          placeholder="搜索店铺名称"
-          @keyup.enter="search"
-        />
-        <button @click="search">搜索</button>
+      <div class="search-shell">
+        <div class="search-box">
+          <el-icon><Search /></el-icon>
+          <input
+            v-model="keyword"
+            placeholder="搜索店铺、笔记和优惠"
+            @focus="handleSuggestionFocus"
+            @blur="handleSuggestionBlur"
+            @keydown.down.prevent="moveSuggestion(1)"
+            @keydown.up.prevent="moveSuggestion(-1)"
+            @keydown.enter.prevent="handleSearchEnter"
+            @keydown.esc.prevent="closeSuggestions"
+          />
+          <button @click="search">搜索</button>
+        </div>
+        <div
+          v-if="searchFocused && suggestionsVisible && !keywordTooLong"
+          class="suggestion-panel"
+        >
+          <button
+            v-for="(suggestion, index) in suggestions"
+            :key="`${suggestion.type}-${suggestion.sourceId}`"
+            class="suggestion-item"
+            :class="{ active: highlightedIndex === index }"
+            @mousedown.prevent="selectSuggestion(suggestion)"
+            @mouseenter="highlightedIndex = index"
+          >
+            <span class="suggestion-copy">
+              <strong>{{ suggestion.suggestionText }}</strong>
+              <span v-if="suggestion.title !== suggestion.suggestionText">
+                {{ suggestion.title }}
+              </span>
+              <small>{{ suggestion.subtitle }}</small>
+            </span>
+            <em>{{ TYPE_LABELS[suggestion.type] || suggestion.type }}</em>
+          </button>
+          <div v-if="suggestionsLoading" class="suggestion-tip">
+            正在搜索...
+          </div>
+          <div
+            v-else-if="!suggestions.length"
+            class="suggestion-tip"
+          >
+            暂无匹配建议
+          </div>
+        </div>
+        <div v-if="keywordTooLong" class="search-length-tip">
+          关键词最多 10 个字
+        </div>
       </div>
       <button class="profile-entry" @click="router.push('/profile')">
         <el-icon><User /></el-icon>
@@ -200,10 +403,16 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.search-shell {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
 .search-box {
   display: flex;
-  flex: 1;
   align-items: center;
+  width: 100%;
   min-width: 0;
   height: 38px;
   padding-left: 12px;
@@ -229,6 +438,95 @@ onMounted(() => {
   background: #ffe7dc;
   color: var(--brand);
   font-size: 13px;
+}
+
+.suggestion-panel {
+  position: absolute;
+  top: calc(100% + 7px);
+  right: 0;
+  left: 0;
+  z-index: 30;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgb(0 0 0 / 16%);
+}
+
+.suggestion-item {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid #f1f1f1;
+  background: #fff;
+  color: #333;
+  text-align: left;
+}
+
+.suggestion-item:last-of-type {
+  border-bottom: 0;
+}
+
+.suggestion-item.active {
+  background: #fff4ef;
+}
+
+.suggestion-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.suggestion-copy strong,
+.suggestion-copy span,
+.suggestion-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestion-copy strong {
+  color: #222;
+  font-size: 14px;
+}
+
+.suggestion-copy span,
+.suggestion-copy small {
+  color: #888;
+  font-size: 11px;
+}
+
+.suggestion-item em {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #fff0ea;
+  color: var(--brand);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.suggestion-tip {
+  padding: 12px;
+  color: #999;
+  font-size: 12px;
+  text-align: center;
+}
+
+.search-length-tip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgb(0 0 0 / 75%);
+  color: #fff;
+  font-size: 11px;
 }
 
 .profile-entry {

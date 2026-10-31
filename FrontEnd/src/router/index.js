@@ -4,6 +4,11 @@ import { getToken } from "../utils/auth";
 const routes = [
   { path: "/", redirect: "/home" },
   { path: "/home", name: "home", component: () => import("../components/router_1.vue") },
+  {
+    path: "/search-results",
+    name: "search-results",
+    component: () => import("../components/searchResults.vue")
+  },
   { path: "/shop-list", name: "shop-list", component: () => import("../components/shopList.vue") },
   { path: "/shop/:id", name: "shop-detail", component: () => import("../components/shopDetail.vue") },
   {

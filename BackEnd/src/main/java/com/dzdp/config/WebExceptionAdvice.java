@@ -1,6 +1,7 @@
 package com.dzdp.config;
 
 import com.dzdp.dto.Result;
+import com.dzdp.dto.StatusCode;
 import com.dzdp.ratelimit.RateLimitException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
@@ -23,12 +24,12 @@ public class WebExceptionAdvice {
         log.warn("[RATE-LIMIT] 请求被限流: {} retryAfter={}s", e.getMessage(), retryAfterSeconds);
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(retryAfterSeconds))
-                .body(Result.fail(e.getMessage()));
+                .body(Result.fail(StatusCode.TOO_MANY_REQUESTS, e.getMessage()));
     }
 
     @ExceptionHandler(RuntimeException.class)
     public Result handleRuntimeException(RuntimeException e) {
         log.error(e.toString(), e);
-        return Result.fail("服务器异常");
+        return Result.fail(StatusCode.SYSTEM_ERROR);
     }
 }
